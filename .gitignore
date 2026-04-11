@@ -32,3 +32,12 @@ var/
 .lsp-session*
 gotools/
 eln-cache/
+
+# Sean's additions
+personal/preload/preload-local.el
+personal/custom.el
+oauth2-auto.plist
+.org-id-locations
+.org-generic-id-locations
+org-clock-save.el
+org-roam.db
