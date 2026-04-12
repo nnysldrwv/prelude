@@ -334,10 +334,16 @@
 ;;  7. Consult extra bindings
 ;; ============================================================
 
+;; Override prelude-vertico's M-s f (consult-find) with consult-fd.
+;; Must be OUTSIDE with-eval-after-load so the binding takes effect
+;; before consult loads — otherwise the first M-s f invokes consult-find
+;; which calls Windows find.exe (a text search tool, not file finder).
+(autoload 'consult-fd "consult" nil t)
+(global-set-key (kbd "M-s f") #'consult-fd)
+
 (with-eval-after-load 'consult
   (global-set-key (kbd "C-s") 'consult-line)
   (global-set-key (kbd "C-x C-r") 'consult-recent-file)
-  (global-set-key (kbd "M-s f") 'consult-fd)
   (setq consult-fd-args '((if (executable-find "fdfind" 'remote) "fdfind" "fd")
                            "--full-path --color=never --hidden"))
 
@@ -1064,6 +1070,14 @@
   (require 'calendar)
   (require 'cal-china))
 (setq org-agenda-include-diary nil)
+
+;; Hide redundant tags in agenda (avoid line wrapping for habits etc.)
+(setq org-agenda-hide-tags-regexp "personal\\|habit")
+
+;; Disable flycheck in org-mode (global-flycheck-mode enables it everywhere;
+;; the built-in org-lint checker is noisy and unhelpful for normal editing)
+(with-eval-after-load 'flycheck
+  (setq flycheck-global-modes '(not org-mode)))
 
 ;; ============================================================
 ;;  16. Terminal Chinese Input (pyim)
