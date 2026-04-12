@@ -41,7 +41,7 @@
   :defer t)
 
 (defun prelude-css-mode-defaults ()
-  (rainbow-mode +1)
+  (when (fboundp 'rainbow-mode) (rainbow-mode +1))
   (run-hooks 'prelude-prog-mode-hook))
 
 (setq prelude-css-mode-hook 'prelude-css-mode-defaults)
