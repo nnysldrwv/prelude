@@ -121,6 +121,70 @@
     "C-c w e" "elfeed"))
 
 ;; ============================================================
+;;  2b. Stolen-from-the-best — 2026-04 Emacs Redux roundup
+;;      https://emacsredux.com/blog/2026/04/07/stealing-from-the-best-emacs-configs/
+;; ============================================================
+
+;; --- Performance: bidi scanning (Doom) ---
+;; No RTL editing → skip bidirectional reordering on every redisplay.
+(setq-default bidi-display-reordering 'left-to-right
+              bidi-paragraph-direction 'left-to-right)
+(setq bidi-inhibit-bpa t)
+
+;; --- Performance: LSP process I/O (Doom, Purcell, Centaur) ---
+;; Default 64KB is way too small for modern LSP servers.
+(setq read-process-output-max (* 4 1024 1024)) ; 4 MB
+
+;; --- Performance: don't render cursors in unfocused windows (Doom) ---
+(setq-default cursor-in-non-selected-windows nil)
+(setq highlight-nonselected-windows nil)
+
+;; --- Kill ring & clipboard ---
+;; Save clipboard before kill so C-y gets the kill, M-y gets the old clipboard.
+(setq save-interprogram-paste-before-kill t)
+;; Don't waste kill-ring slots on identical entries.
+(setq kill-do-not-save-duplicates t)
+
+;; Persist kill-ring across sessions (Prelude only saves search-ring by default).
+(with-eval-after-load 'savehist
+  (unless (memq 'kill-ring savehist-additional-variables)
+    (push 'kill-ring savehist-additional-variables)))
+;; Strip text properties to keep savehist file small (Doom).
+(add-hook 'savehist-save-hook
+          (lambda ()
+            (setq kill-ring
+                  (mapcar #'substring-no-properties
+                          (cl-remove-if-not #'stringp kill-ring)))))
+
+;; --- Editing: prevent ffap from pinging hostnames (Centaur) ---
+(setq ffap-machine-p-known 'reject)
+
+;; --- Windows: proportional resize + reversible C-x 1 (Purcell, Prot) ---
+(setq window-combination-resize t)
+
+;; winner-mode is already enabled by Prelude; add a toggle for C-x 1.
+(defun my/toggle-delete-other-windows ()
+  "Delete other windows in frame if any, or restore previous window config."
+  (interactive)
+  (if (and winner-mode
+           (equal (selected-window) (next-window)))
+      (winner-undo)
+    (delete-other-windows)))
+(global-set-key (kbd "C-x 1") #'my/toggle-delete-other-windows)
+
+;; --- Navigation: fast mark popping (Purcell, Centaur, Prot) ---
+;; After the first C-u C-SPC, keep pressing C-SPC to keep popping.
+(setq set-mark-command-repeat-pop t)
+
+;; --- UX: recenter after save-place restores position (Doom) ---
+(advice-add 'save-place-find-file-hook :after
+            (lambda (&rest _)
+              (when buffer-file-name (ignore-errors (recenter)))))
+
+;; --- UX: auto-select help window (Prot) ---
+(setq help-window-select t)
+
+;; ============================================================
 ;;  3. Windows-specific performance tuning
 ;; ============================================================
 
@@ -397,6 +461,17 @@
   (setq org-startup-folded 'content)
   (setq org-hide-emphasis-markers t)
   (setq org-ellipsis " ▾")
+
+  ;; Writing ergonomics in Org: keep trailing/tab whitespace checks,
+  ;; but stop highlighting long prose lines like journal entries.
+  (defun my/org-whitespace-setup ()
+    "Tame whitespace visualization in Org buffers."
+    (setq-local whitespace-style '(face tabs empty trailing))
+    (when whitespace-mode
+      (whitespace-mode -1)
+      (whitespace-mode +1))
+    (visual-line-mode +1))
+  (add-hook 'org-mode-hook #'my/org-whitespace-setup)
 
   ;; Inline images
   (setq image-use-external-converter t)
@@ -1230,7 +1305,15 @@
 ;;   (add-hook 'after-save-hook #'arya-sync-after-save-hook))
 
 ;; ============================================================
-;;  20. Startup message
+;;  20. Encoding — 全局 UTF-8，避免保存时询问编码
+;; ============================================================
+
+(prefer-coding-system 'utf-8)
+(set-language-environment "UTF-8")
+(set-default-coding-systems 'utf-8)
+
+;; ============================================================
+;;  21. Startup message
 ;; ============================================================
 
 (add-hook 'after-init-hook
