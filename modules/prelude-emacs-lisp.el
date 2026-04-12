@@ -92,10 +92,16 @@ Start `ielm' if it's not already running."
 
 ;; M-. to jump to Elisp definition, C-c C-d to describe symbol at
 ;; point.  Complements built-in xref with Elisp-specific navigation.
+;; Use :defer t to avoid hook firing before package is installed during bootstrap
 (use-package elisp-slime-nav
   :ensure t
   :diminish
-  :hook ((emacs-lisp-mode ielm-mode) . elisp-slime-nav-mode))
+  :defer t
+  :config
+  (dolist (hook '(emacs-lisp-mode-hook ielm-mode-hook))
+    (add-hook hook (lambda ()
+                     (when (fboundp 'elisp-slime-nav-mode)
+                       (elisp-slime-nav-mode +1))))))
 
 ;; Colorize color names and hex values in Elisp buffers
 (use-package rainbow-mode
