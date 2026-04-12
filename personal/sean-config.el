@@ -1313,7 +1313,14 @@
 (set-default-coding-systems 'utf-8)
 
 ;; ============================================================
-;;  21. Startup message
+;;  21. Emacs server (enable emacsclient support)
+;; ============================================================
+
+(require 'server)
+(unless (server-running-p) (server-start))
+
+;; ============================================================
+;;  22. Startup message
 ;; ============================================================
 
 (add-hook 'after-init-hook
