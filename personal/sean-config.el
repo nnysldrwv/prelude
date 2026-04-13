@@ -477,8 +477,36 @@
   (setq image-use-external-converter t)
   (setq org-image-actual-width '(600))
 
+  ;; ---- org-attach: 统一附件管理 ----
+  (require 'org-attach)
+  (setq org-attach-id-dir (expand-file-name "data/" org-directory)) ; ~/org/data/
+  (setq org-attach-method 'cp)              ; 复制文件（不移动/不链接）
+  (setq org-attach-use-inheritance t)        ; 子 heading 继承父附件目录
+  (setq org-attach-store-link-p 'attached)   ; attach 后自动存储 org link
+  (setq org-attach-auto-tag nil)             ; 不自动打 :ATTACH: tag（保持标签简洁）
+
+  ;; ---- 修复 attachment 链接中文乱码 ----
+  ;; org-attach 对非 ASCII 文件名做 percent-encoding，导致链接不可读。
+  ;; 修复方式：attach 后自动给 stored link 补上解码的文件名作为描述，
+  ;; 这样 C-c C-l 插入时显示为 [[attachment:编码路径][原始文件名.pdf]]
+  (defun my/org-attach-store-link-decoded (&rest _)
+    "Fix stored links from `org-attach-attach' to include decoded description."
+    (when org-stored-links
+      (let ((latest (car org-stored-links)))
+        (when (and (stringp (car latest))
+                   (string-prefix-p "attachment:" (car latest))
+                   (or (null (cadr latest)) (string= (cadr latest) "")))
+          (setcar (cdr latest)
+                  (decode-coding-string
+                   (url-unhex-string
+                    (file-name-nondirectory
+                     (substring (car latest) (length "attachment:"))))
+                   'utf-8))))))
+  (advice-add 'org-attach-attach :after #'my/org-attach-store-link-decoded)
+
   ;; Agenda
   (setq org-agenda-inhibit-startup t)
+  (setq org-agenda-tags-column -200)
   (put 'org-agenda-files 'saved-value nil)
   (put 'org-agenda-files 'customized-value nil)
   (setq org-agenda-files '("~/org/inbox.org"
@@ -679,20 +707,16 @@
 
   ;; ---- Archive done tasks ----
   (defun my/org-archive-done-tasks ()
-    "Archive all DONE/CANCELLED tasks. Skip ~/org/collections/."
+    "Archive DONE/CANCELLED tasks in the *current file only*."
     (interactive)
-    (let ((file (buffer-file-name)))
-      (if (and file
-               (string-prefix-p
-                (expand-file-name "~/org/collections/")
-                (expand-file-name file)))
-          (message "⏭ Skipped collection file %s" (file-name-nondirectory file))
-        (org-map-entries
-         (lambda ()
-           (org-archive-subtree)
-           (setq org-map-continue-from (org-element-property :begin (org-element-at-point))))
-         "/DONE|CANCELLED" 'file)
-        (message "✅ Archived all done/cancelled tasks"))))
+    (unless (buffer-file-name)
+      (user-error "Not visiting a file — open an org file first"))
+    (org-map-entries
+     (lambda ()
+       (org-archive-subtree)
+       (setq org-map-continue-from (org-element-property :begin (org-element-at-point))))
+     "/DONE|CANCELLED" 'file)
+    (message "✅ Archived done/cancelled tasks in %s" (file-name-nondirectory (buffer-file-name))))
   (define-key org-mode-map (kbd "C-c A") #'my/org-archive-done-tasks))
 
 (global-set-key (kbd "C-c i t") 'org-toggle-inline-images)
@@ -805,11 +829,11 @@
       org-appear-autoemphasis t
       org-appear-delay 0.3)
 
-;; org-download
+;; org-download — 走 org-attach 体系
 (prelude-require-packages '(org-download))
 (add-hook 'org-mode-hook 'org-download-enable)
-(setq org-download-image-dir "./.images"
-      org-download-heading-lvl nil
+(setq org-download-method 'attach              ; 截图/拖拽图片存入 org-attach 目录
+      org-download-heading-lvl 0               ; 附加到最近的 heading（需要 heading 有/自动生成 ID）
       org-download-timestamp "%Y%m%d%H%M%S-"
       org-download-image-org-width 800
       org-download-annotate-function (lambda (_link) "")
@@ -1076,6 +1100,20 @@
 (setq elfeed-curl-max-connections 4)
 (add-hook 'elfeed-show-mode-hook (lambda () (setq-local shr-use-fonts nil)))
 
+;; Defensive fix: elfeed-db sometimes gets corrupted (set to a non-plist value
+;; like "NEXT" or "(W16)") due to find-file-noselect hooks firing during
+;; elfeed-db-load. elfeed-db-ensure only checks for nil, so a corrupted value
+;; slips through. This advice validates the db before every save and reloads
+;; from disk if it's bad.
+(defun my/elfeed-db-sanitize-before-save (&rest _)
+  "Ensure elfeed-db is a valid plist before saving. Reload if corrupt."
+  (unless (and elfeed-db (plistp elfeed-db))
+    (message "elfeed-db is corrupt (%S), reloading from disk..." elfeed-db)
+    (setf elfeed-db nil)
+    (elfeed-db-load)))
+(with-eval-after-load 'elfeed-db
+  (advice-add 'elfeed-db-save :before #'my/elfeed-db-sanitize-before-save))
+
 ;; mpv integration
 (defun my/elfeed-play-with-mpv ()
   "Play the current elfeed entry with mpv."
@@ -1326,6 +1364,82 @@
 (add-hook 'after-init-hook
           (lambda ()
             (message "✓ Prelude + Sean config loaded! (%s)" emacs-version)))
+
+
+;; ============================================================
+;;  23. Reading: pdf-tools + nov.el + org-noter
+;; ============================================================
+
+;; --- pdf-tools: 高清 PDF 渲染，替代 DocView ---
+;; epdfinfo.exe 由 MSYS2 提供：scoop install msys2 → pacman -S mingw-w64-x86_64-emacs-pdf-tools-server
+(prelude-require-package 'pdf-tools)
+(setenv "PATH" (concat "C:\\Users\\fengxing.chen\\scoop\\apps\\msys2\\current\\mingw64\\bin" ";" (getenv "PATH")))
+(setq pdf-info-epdfinfo-program "C:\\Users\\fengxing.chen\\scoop\\apps\\msys2\\current\\mingw64\\bin\\epdfinfo.exe")
+(with-eval-after-load 'pdf-tools
+  (pdf-tools-install :no-query))
+
+;; PDF 文件自动用 pdf-view-mode
+(add-to-list 'auto-mode-alist '("\\.pdf\\'" . pdf-view-mode))
+
+;; pdf-view 基本设置
+(with-eval-after-load 'pdf-view
+  ;; 自动适应窗口宽度
+  (setq-default pdf-view-display-size 'fit-page)
+  ;; 高亮颜色
+  (setq pdf-view-midnight-colors '("#ffffff" . "#1e1e2e"))
+  ;; 快捷键：h 高亮，t 文字批注，d 划线
+  (define-key pdf-view-mode-map (kbd "C-c C-a h") #'pdf-annot-add-highlight-markup-annotation)
+  (define-key pdf-view-mode-map (kbd "C-c C-a t") #'pdf-annot-add-text-annotation)
+  (define-key pdf-view-mode-map (kbd "C-c C-a d") #'pdf-annot-add-strikeout-markup-annotation))
+
+;; --- nov.el: EPUB 阅读器 ---
+(prelude-require-package 'nov)
+(add-to-list 'auto-mode-alist '("\\.epub\\'" . nov-mode))
+
+(with-eval-after-load 'nov
+  ;; 阅读字体用 variable-pitch（更好看）
+  (defun my/nov-setup ()
+    (face-remap-add-relative 'default :family "霞鹜文楷"
+                             :height 140)
+    (visual-line-mode 1)
+    (setq nov-text-width 80))
+  (add-hook 'nov-mode-hook #'my/nov-setup))
+
+;; --- org-noter: 文档 + org 笔记双向同步 ---
+(prelude-require-package 'org-noter)
+
+(with-eval-after-load 'org-noter
+  ;; 笔记默认存放目录（你的 org references 目录）
+  (setq org-noter-notes-search-path '("~/org/references/"))
+  ;; 默认笔记文件名 = 文档文件名.org
+  (setq org-noter-default-notes-file-names '("notes.org"))
+  ;; 自动保存位置
+  (setq org-noter-auto-save-last-location t)
+  ;; 打开时自动分屏（文档左，笔记右）
+  (setq org-noter-notes-window-location 'horizontal-split)
+  ;; 高亮当前笔记对应位置
+  (setq org-noter-highlight-selected-text t))
+
+;; org-noter 快捷键（C-c n 前缀在 sean-config 里已用于 roam，改用 C-c N）
+(global-set-key (kbd "C-c N") #'org-noter)
+
+(with-eval-after-load 'which-key
+  (which-key-add-key-based-replacements
+    "C-c N" "org-noter-start"))
+
+;; ============================================================
+;;  24. Fix: Org-mode 中文环境下强调标记（加粗/高亮等）不生效
+;;  原因：org-mode 要求标记符号两侧是空白或标点，中文字符不满足
+;;  方案：将 Unicode 字母（含汉字）加入合法前/后缀字符集
+;;  备注：等 Emacs 31版本，会修复这个问题。
+;; ============================================================
+(with-eval-after-load 'org
+  (setcar org-emphasis-regexp-components
+          " \t('\"{[:alpha:][:nonascii:]")
+  (setcar (nthcdr 1 org-emphasis-regexp-components)
+          "[:alpha:][:nonascii:]- \t.,:!?;'\")}\\")
+  (org-set-emph-re 'org-emphasis-regexp-components
+                   org-emphasis-regexp-components))
 
 (provide 'sean-config)
 ;;; sean-config.el ends here

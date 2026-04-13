@@ -41,3 +41,4 @@ oauth2-auto.plist
 .org-generic-id-locations
 org-clock-save.el
 org-roam.db
+server/
