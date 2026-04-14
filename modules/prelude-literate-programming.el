@@ -32,12 +32,12 @@
 (defvar prelude-ipynb-packages
   '(code-cells   ; file mode for code-cells
     ein          ; Emacs Ipython Notebook (Jupyter Client)
-    elpy         ; emacs python development environment
+    ;; elpy      ; removed — package delisted from MELPA (2026-04)
     ))
 
 (defvar prelude-ob-packages
   '(ob-async   ; asynchronous execution of code-blocks
-    ob-ipython ; for python and ipython
+    ;; ob-ipython ; for python and ipython — DISABLED: requires jupyter/ipython installed
     ob-tmux    ; for shell
     ob-deno    ; for javascript
     ob-typescript
@@ -49,7 +49,7 @@
 
 (setq prelude-ob-loader-list
   '((python . t)
-    (ipython . t)
+    ;; (ipython . t) ; DISABLED: requires jupyter/ipython installed
     (shell . t)
     (js . t)
     (typescript . t)

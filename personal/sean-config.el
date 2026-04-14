@@ -838,6 +838,20 @@
       org-download-image-org-width 800
       org-download-annotate-function (lambda (_link) "")
       org-download-screenshot-method (my/org-download-screenshot-command))
+
+;; Fix: org-download-dnd-fallback 使用了 Emacs 30 已废弃的 dnd-handle-one-url，
+;; 导致拖入非图片文件（如 epub）时报 Wrong type argument: listp 错误。
+;; 改用 Emacs 30+ 的 dnd-handle-multiple-urls API。
+(with-eval-after-load 'org-download
+  (when (fboundp 'dnd-handle-multiple-urls)
+    (defun org-download-dnd-fallback (uri action)
+      (let ((dnd-protocol-alist
+             (rassq-delete-all
+              'org-download-dnd
+              (copy-alist dnd-protocol-alist))))
+        (dnd-handle-multiple-urls
+         (selected-window) (list uri) action)))))
+
 (with-eval-after-load 'org
   (define-key org-mode-map (kbd "C-c i p") 'org-download-clipboard)
   (define-key org-mode-map (kbd "C-c i s") 'org-download-screenshot)
@@ -1381,8 +1395,39 @@
 ;; PDF 文件自动用 pdf-view-mode
 (add-to-list 'auto-mode-alist '("\\.pdf\\'" . pdf-view-mode))
 
+;; Org 中对 PDF 链接强制走 pdf-tools，避免 attachment 链接只按文本打开
+(defun my/org-open-pdf-with-pdf-tools (file _link)
+  "Open PDF FILE in Emacs with `pdf-view-mode'."
+  (require 'pdf-tools nil t)
+  (require 'pdf-view nil t)
+  (find-file file)
+  (unless (derived-mode-p 'pdf-view-mode)
+    (pdf-view-mode)))
+
+;; Org 中对 EPUB 链接强制走 nov.el，同理避免 attachment 按文本打开
+(defun my/org-open-epub-with-nov (file _link)
+  "Open EPUB FILE in Emacs with `nov-mode'."
+  (require 'nov nil t)
+  (find-file file)
+  (unless (derived-mode-p 'nov-mode)
+    (nov-mode)))
+
+(with-eval-after-load 'org
+  ;; PDF → pdf-tools
+  (let ((pdf-entry (assoc "\\.pdf\\'" org-file-apps)))
+    (if pdf-entry
+        (setcdr pdf-entry #'my/org-open-pdf-with-pdf-tools)
+      (add-to-list 'org-file-apps '("\\.pdf\\'" . my/org-open-pdf-with-pdf-tools))))
+  ;; EPUB → nov.el
+  (let ((epub-entry (assoc "\\.epub\\'" org-file-apps)))
+    (if epub-entry
+        (setcdr epub-entry #'my/org-open-epub-with-nov)
+      (add-to-list 'org-file-apps '("\\.epub\\'" . my/org-open-epub-with-nov)))))
+
 ;; pdf-view 基本设置
 (with-eval-after-load 'pdf-view
+  ;; display-line-numbers-mode 与 pdf-view-mode 不兼容，进入时关掉
+  (add-hook 'pdf-view-mode-hook (lambda () (display-line-numbers-mode -1)))
   ;; 自动适应窗口宽度
   (setq-default pdf-view-display-size 'fit-page)
   ;; 高亮颜色
@@ -1397,6 +1442,8 @@
 (add-to-list 'auto-mode-alist '("\\.epub\\'" . nov-mode))
 
 (with-eval-after-load 'nov
+  ;; Windows 上 unzip 由 Git 提供
+  (setq nov-unzip-program "C:/Program Files/Git/usr/bin/unzip.exe")
   ;; 阅读字体用 variable-pitch（更好看）
   (defun my/nov-setup ()
     (face-remap-add-relative 'default :family "霞鹜文楷"

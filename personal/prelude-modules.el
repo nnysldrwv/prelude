@@ -7,6 +7,7 @@
 
 ;;; Org-mode
 (require 'prelude-org)
+(require 'prelude-literate-programming) ; ob-python, ob-shell, babel languages
 
 ;;; Programming languages (enable what you use)
 (require 'prelude-emacs-lisp)
