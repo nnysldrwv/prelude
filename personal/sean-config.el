@@ -294,6 +294,24 @@
   (when (daemonp)
     (desktop-save-mode 1)))
 
+(defun my/desktop-cleanup-restart-helper-frame (frame)
+  "Delete redundant restart helper FRAME after desktop restoration.
+The helper-created frame is only needed to trigger desktop restoration in
+daemon mode.  Once desktop has restored the saved client frames, drop the
+temporary helper frame if another GUI client frame now exists."
+  (when (and (frame-live-p frame)
+             (frame-parameter frame 'my-restart-helper-frame))
+    (set-frame-parameter frame 'my-restart-helper-frame nil)
+    (let ((other-client-frames
+           (seq-filter
+            (lambda (other-frame)
+              (and (not (eq other-frame frame))
+                   (my/desktop-client-frame-p other-frame)))
+            (frame-list))))
+      (when other-client-frames
+        (select-frame-set-input-focus (car other-client-frames))
+        (delete-frame frame)))))
+
 (defun my/desktop-restore-for-daemon-frame (&optional frame)
   "In daemon mode, restore desktop once on the first usable GUI FRAME."
   (when (and (daemonp)
@@ -307,12 +325,13 @@
        (lambda ()
          (when (and (frame-live-p target-frame)
                     (eq my/desktop-restore-state 'scheduled))
-           (setq my/desktop-restore-state 'running)
-           (with-selected-frame target-frame
-             (let ((desktop-load-locked-desktop t))
-               (desktop-read desktop-dirname)
-               (select-frame-set-input-focus target-frame)))
-           (setq my/desktop-restore-state 'done)))))))
+            (setq my/desktop-restore-state 'running)
+            (with-selected-frame target-frame
+              (let ((desktop-load-locked-desktop t))
+                (desktop-read desktop-dirname)
+                (my/desktop-cleanup-restart-helper-frame target-frame)
+                (select-frame-set-input-focus target-frame)))
+            (setq my/desktop-restore-state 'done)))))))
 
 (defun my/desktop-maybe-save-on-frame-delete (frame)
   "Persist desktop when deleting the last GUI frame in daemon mode."
@@ -368,6 +387,63 @@
 ;;  6. Restart Emacs
 ;; ============================================================
 
+(defvar my/restart-emacs-helper-script
+  (expand-file-name "scripts/restart-emacs-daemon.ps1"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "PowerShell helper used to restart Emacs daemon on Windows.")
+
+(defun my/restart-emacs-windows-powershell ()
+  "Return the PowerShell executable used by the Windows restart helper."
+  (or (executable-find "pwsh")
+      (executable-find "pwsh.exe")
+      (executable-find "powershell.exe")
+      (user-error "PowerShell executable not found")))
+
+(defun my/restart-emacs-server-file ()
+  "Return the current server authentication file path."
+  (expand-file-name
+   (or (and (boundp 'server-name) server-name) "server")
+   (expand-file-name
+    (or (and (boundp 'server-auth-dir) server-auth-dir)
+        "~/.emacs.d/server/"))))
+
+(defun my/restart-emacs-windows-command (&optional launcher)
+  "Build the PowerShell command used to restart Windows Emacs.
+When LAUNCHER is non-nil, start a detached helper process first."
+  (unless (file-exists-p my/restart-emacs-helper-script)
+    (user-error "Restart helper not found: %s" my/restart-emacs-helper-script))
+  (append
+   (list (my/restart-emacs-windows-powershell)
+         "-NoProfile"
+         "-NonInteractive"
+         "-ExecutionPolicy"
+         "Bypass"
+         "-File"
+         my/restart-emacs-helper-script
+         "-OldPid"
+         (number-to-string (emacs-pid))
+         "-EmacsBinDir"
+         (directory-file-name (expand-file-name invocation-directory))
+         "-ServerFile"
+         (my/restart-emacs-server-file)
+         "-ServerName"
+         (or (and (boundp 'server-name) server-name) "server"))
+   (when launcher
+     '("-Launcher"))
+   (when (display-graphic-p)
+     '("-LaunchClient"))))
+
+(defun my/restart-emacs-windows ()
+  "Restart Windows Emacs via an external helper after this daemon exits."
+  (let* ((command (my/restart-emacs-windows-command t))
+         (program (car command))
+         (args (cdr command))
+         (w32-start-process-show-window nil)
+         (w32-start-process-share-console nil)
+         (exit-code (apply #'call-process program nil nil nil args)))
+    (unless (zerop exit-code)
+      (user-error "Failed to launch restart helper: %s" exit-code))))
+
 (defun my/restart-emacs ()
   "Restart Emacs cross-platform."
   (interactive)
@@ -375,14 +451,7 @@
     (desktop-save desktop-dirname t))
   (cond
    ((eq system-type 'windows-nt)
-    (let* ((fixed-runemacs "C:/Users/fengxing.chen/scoop/apps/msys2/current/mingw64/bin/runemacs.exe")
-           (runemacs-bin (cond
-                          ((file-exists-p fixed-runemacs) fixed-runemacs)
-                          ((file-exists-p (expand-file-name "runemacs.exe" invocation-directory))
-                           (expand-file-name "runemacs.exe" invocation-directory))
-                          (t nil)))
-           (emacs-bin (or runemacs-bin (expand-file-name invocation-name invocation-directory))))
-      (call-process "cmd.exe" nil 0 nil "/c" "start" "" emacs-bin)))
+    (my/restart-emacs-windows))
    ((eq system-type 'darwin)
     (if (executable-find "open")
         (call-process "open" nil 0 nil "-n" "-a" "Emacs")
@@ -851,6 +920,32 @@
               (copy-alist dnd-protocol-alist))))
         (dnd-handle-multiple-urls
          (selected-window) (list uri) action)))))
+
+;; Fix: org-download--fullname 只解码 %20 → 空格，其他 percent-encoding
+;; （如中文 %E4%B8%96%E7%95%8C）原样保留，导致拖入中文文件名时生成乱码副本。
+;; 改为完整 url-unhex-string + UTF-8 解码。
+(with-eval-after-load 'org-download
+  (defun org-download--fullname (link &optional ext)
+    "Return the file name where LINK will be saved to.
+It's affected by `org-download--dir'.
+EXT can hold the file extension, in case LINK doesn't provide it.
+[patched] Full percent-decoding for non-ASCII filenames."
+    (let ((filename
+           (decode-coding-string
+            (url-unhex-string
+             (file-name-nondirectory
+              (car (url-path-and-query
+                    (url-generic-parse-url link)))))
+            'utf-8))
+          (dir (org-download--dir)))
+      (when (string-match ".*?\\.\\(?:png\\|jpg\\)\\(.*\\)$" filename)
+        (setq filename (replace-match "" nil nil filename 1)))
+      (when ext
+        (setq filename (concat (file-name-sans-extension filename) "." ext)))
+      (abbreviate-file-name
+       (expand-file-name
+        (funcall org-download-file-format-function filename)
+        dir)))))
 
 (with-eval-after-load 'org
   (define-key org-mode-map (kbd "C-c i p") 'org-download-clipboard)
@@ -1444,13 +1539,47 @@
 (with-eval-after-load 'nov
   ;; Windows 上 unzip 由 Git 提供
   (setq nov-unzip-program "C:/Program Files/Git/usr/bin/unzip.exe")
-  ;; 阅读字体用 variable-pitch（更好看）
+
+  ;; nov-render-html 内部 let-bind shr-use-fonts 为 nov-variable-pitch
+  (setq nov-variable-pitch nil)
+
   (defun my/nov-setup ()
-    (face-remap-add-relative 'default :family "霞鹜文楷"
-                             :height 140)
+    (let ((font (or (my/first-available-font '("Noto Sans SC"
+                                               "Noto Serif SC"
+                                               "Microsoft YaHei UI"
+                                               "Microsoft YaHei"))
+                    "Microsoft YaHei")))
+      ;; face-remap 只对 ASCII 生效；CJK 字符走 fontset 不走 face :family。
+      ;; 用 nil target 设为 fontset 的默认字体，覆盖所有字符。
+      (face-remap-add-relative 'default :family font :height 140)
+      (face-remap-add-relative 'variable-pitch :family font :height 140)
+      (set-fontset-font t nil (font-spec :family font) nil 'prepend)
+      (message "nov: using font \"%s\"" font))
     (visual-line-mode 1)
     (setq nov-text-width 80))
-  (add-hook 'nov-mode-hook #'my/nov-setup))
+  (add-hook 'nov-mode-hook #'my/nov-setup)
+
+  ;; nov-save-place 用 with-temp-file 写阅读进度，
+  ;; 含中文路径时触发 coding-system 选择框，强制 utf-8 写入
+  (defun my/nov-save-place-a (orig-fn &rest args)
+    (let ((coding-system-for-write 'utf-8))
+      (apply orig-fn args)))
+  (advice-add 'nov-save-place :around #'my/nov-save-place-a))
+
+;; --- emacs-reader: MuPDF 后端的文档阅读器，试用中 ---
+;; 支持 PDF/EPUB/MOBI/FB2/XPS/CBZ/DOCX 等，用来对比 pdf-tools + nov.el
+;; 手动试用：M-x reader-mode  或  M-x my/open-with-reader
+;; 如果效果好，后续替换 auto-mode-alist
+(add-to-list 'load-path (expand-file-name "site-lisp/reader" user-emacs-directory))
+(require 'reader-autoloads nil t)
+
+(defun my/open-with-reader ()
+  "Open current file buffer with `reader-mode' (emacs-reader)."
+  (interactive)
+  (reader-mode))
+
+(with-eval-after-load 'reader
+  (add-hook 'reader-mode-hook (lambda () (display-line-numbers-mode -1))))
 
 ;; --- org-noter: 文档 + org 笔记双向同步 ---
 (prelude-require-package 'org-noter)
@@ -1465,7 +1594,43 @@
   ;; 打开时自动分屏（文档左，笔记右）
   (setq org-noter-notes-window-location 'horizontal-split)
   ;; 高亮当前笔记对应位置
-  (setq org-noter-highlight-selected-text t))
+  (setq org-noter-highlight-selected-text t)
+
+  ;; 强制笔记创建到 ~/org/references/，不跟随 PDF 文件所在目录
+  ;; 解决：PDF 在 c:/ 根目录时 org-noter 默认逻辑尝试写 c:/ → Permission denied
+  (setq org-noter-create-session-from-document-hook
+        '(my/org-noter-create-session-in-references)))
+
+(defun my/org-noter-create-session-in-references (&optional arg document-file-name)
+  "Create org-noter session, always placing notes in ~/org/references/.
+Default org-noter walks up from the document directory, which fails when
+the PDF lives at a root like c:/."
+  (let* ((document-file-name (or (run-hook-with-args-until-success
+                                  'org-noter-get-buffer-file-name-hook major-mode)
+                                 document-file-name))
+         (document-path (or document-file-name buffer-file-truename
+                            (error "This buffer does not seem to be visiting any file")))
+         (document-name (file-name-nondirectory document-path))
+         (document-base (file-name-base document-name))
+         (notes-dir (expand-file-name "~/org/references/"))
+         (notes-file (expand-file-name (concat document-base ".org") notes-dir)))
+    ;; 确保目录存在
+    (make-directory notes-dir t)
+    ;; 如果笔记文件不存在，创建并写入标题和 NOTER_DOCUMENT 属性
+    (unless (file-exists-p notes-file)
+      (with-temp-file notes-file
+        (insert (format "#+title: %s\n#+filetags: :ref:\n#+created: %s\n\n* %s\n:PROPERTIES:\n:NOTER_DOCUMENT: %s\n:END:\n"
+                        document-base
+                        (format-time-string "[%Y-%m-%d %a]")
+                        document-base
+                        (expand-file-name document-path)))))
+    ;; 打开笔记文件并启动 org-noter
+    (with-current-buffer (find-file-noselect notes-file)
+      (goto-char (point-min))
+      ;; 找到带 NOTER_DOCUMENT 的 heading
+      (re-search-forward (org-re-property org-noter-property-doc-file) nil t)
+      (org-back-to-heading t)
+      (org-noter))))
 
 ;; org-noter 快捷键（C-c n 前缀在 sean-config 里已用于 roam，改用 C-c N）
 (global-set-key (kbd "C-c N") #'org-noter)
@@ -1487,6 +1652,7 @@
           "[:alpha:][:nonascii:]- \t.,:!?;'\")}\\")
   (org-set-emph-re 'org-emphasis-regexp-components
                    org-emphasis-regexp-components))
+
 
 (provide 'sean-config)
 ;;; sean-config.el ends here
